@@ -3,6 +3,9 @@ using Renci.SshNet;
 using System.Text.Json;
 using System.Text;
 using WebApi_Normal.Config;
+using WebApi_Normal.Interfaces;
+using WebApi_Normal.Dominio;
+using WebApi_Normal.Models.Responses;
 
 namespace WebApi_Normal.Controllers
 {
@@ -10,185 +13,87 @@ namespace WebApi_Normal.Controllers
     [Route("[controller]")]
     public class SmsController : ControllerBase
     {
-        private readonly AppSettings _app;
 
-        public SmsController(AppSettings app)
+
+        private readonly ITecnicoRepository _tecnicos;
+        private readonly ISmsService _sms;
+        private readonly IIncidenteProvider _incidentes;
+
+        public SmsController(ITecnicoRepository tecnicos, ISmsService sms, IIncidenteProvider incidentes)
         {
-            _app = app;
+            _tecnicos = tecnicos;
+            _sms = sms;
+            _incidentes = incidentes;
         }
 
         [HttpGet("/sms_api")]
-        public async Task<IActionResult> ProcesarEventos()
+        public async Task<IActionResult> ProcesarIncidentes()
         {
-            Console.WriteLine("Inicio ProcesarEventos");
-
-            var tecnicos = LoadTecnicos();
-
-            List<Dictionary<string, string>> eventos;
-
-            if (OperatingSystem.IsWindows())
-            {
-                eventos = ObtenerEventosWindows();
-            }
-            else
-            {
-                eventos = ObtenerEventosLinux();
-            }
-
-            var errores = new List<string>();
-            var enviados = new List<string>();
-
-            foreach (var ev in eventos)
-            {
-                if (!ev.ContainsKey("torre") || !ev.ContainsKey("msg"))
-                    continue;
-
-                var torre = ev["torre"];
-                if (!tecnicos.TryGetValue(torre, out var phone))
-                {
-                    Console.WriteLine($"No se encontró técnico para torre {torre}");
-                    continue;
-                }
-
-                var mensaje = $"Alerta Torre {torre}: {ev["msg"]}";
-
-                try
-                {
-                    await EnviarSms(phone, mensaje);
-                    enviados.Add($"SMS enviado a {phone}");
-                }
-                catch (Exception ex)
-                {
-                    errores.Add($"Error enviando SMS a {phone}: {ex.Message}");
-                }
-            }
-
-            if (errores.Any())
-            {
-                return StatusCode(500, new
-                {
-                    Mensaje = "Se procesaron eventos, pero ocurrieron errores al enviar SMS.",
-                    Enviados = enviados,
-                    Errores = errores
-                });
-            }
-
-            return Ok(new
-            {
-                Mensaje = "Eventos procesados y SMS enviados correctamente.",
-                Enviados = enviados
-            });
-        }
-
-        private async Task EnviarSms(string numero, string mensaje)
-        {
-            var payload = JsonSerializer.Serialize(new { numero, mensaje });
-
-            var req = new HttpRequestMessage(HttpMethod.Post, _app.Sms.Endpoint);
-            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
-                "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_app.Sms.User}:{_app.Sms.Pass}")));
-            req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-            using var client = new HttpClient();
-            var resp = await client.SendAsync(req);
-            var respBody = await resp.Content.ReadAsStringAsync();
-
-            Console.WriteLine($"SMS enviado a {numero}, status={resp.StatusCode}, respuesta={respBody}");
-        }
-
-        // ---------------- FUNCIONES PRIVADAS ----------------
-        private Dictionary<string, string> LoadTecnicos()
-        {
-            var map = new Dictionary<string, string>();
-            if (!System.IO.File.Exists(_app.CsvPath)) return map;
-            var lines = System.IO.File.ReadAllLines(_app.CsvPath);
-            foreach (var line in lines.Skip(1))
-            {
-                var cols = line.Split(',');
-                if (cols.Length < 5) continue;
-                var torre = cols[4].Trim();
-                var phone = cols[2].Trim();
-                if (!string.IsNullOrEmpty(torre) && !string.IsNullOrEmpty(phone))
-                    map[torre] = phone;
-            }
-            return map;
-        }
-
-        private List<Dictionary<string, string>> ObtenerEventosLinux()
-        {
-            var eventos = new List<Dictionary<string, string>>();
-            foreach (var server in _app.Servers)
-            {
-                using var client = new SshClient(server.Host, server.User, server.Password);
-                try
-                {
-                    client.Connect();
-
-                    var cmd = client.RunCommand($"{_app.PythonPath} {_app.ScriptPath}");// ya que se puede usar el ssh
-
-                    if (!string.IsNullOrWhiteSpace(cmd.Result))
-                    {
-                        var lista = JsonSerializer.Deserialize<List<Dictionary<string, string>>>(cmd.Result);
-                        
-                        if (lista != null)
-                        {
-                            eventos.AddRange(lista);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error conectando a {server.Host}: {ex.Message}");
-                }
-                finally
-                {
-                    if (client.IsConnected) client.Disconnect();
-                }
-            }
-            return eventos;
-        }
-
-        private List<Dictionary<string, string>> ObtenerEventosWindows()
-        {
-            var eventos = new List<Dictionary<string, string>>();
-
+            var result = new ProcesamientoIncidentesResponse();
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = _app.PythonPath,
-                    Arguments = _app.ScriptPath,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
+                var tecnicos = _tecnicos.ListaTecnicos();
 
-                using var process = System.Diagnostics.Process.Start(psi);
-                string output = process.StandardOutput.ReadToEnd();
-                string error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-
-                if (!string.IsNullOrWhiteSpace(error))
+                List<Incidente> incidentes;
+                try
                 {
-                    Console.WriteLine($"[ERROR Python] {error}");
+                    incidentes = _incidentes.GetIncidents();
+                }
+                catch (Exception ex)
+                {
+                    result.ErroresGenerales.Add($"Error obteniendo incidentes: {ex.Message}");
+                    return StatusCode(500, result);
                 }
 
-                if (!string.IsNullOrWhiteSpace(output))
+                result.TotalIncidentes = incidentes.Count;
+
+                foreach (var inc in incidentes)
                 {
-                    var lista = JsonSerializer.Deserialize<List<Dictionary<string, string>>>(output);
-                    if (lista != null)
+                    var detalle = new IncidenteProcesado
                     {
-                        eventos.AddRange(lista);
-                    }      
+                        Torre = inc.Torre,
+                        Mensaje = inc.Mensaje,
+                        Timestamp = inc.Tiempo
+                    };
+
+                    var t = tecnicos.FirstOrDefault(x => x.Torre == inc.Torre);
+                    if (t == null)
+                    {
+                        detalle.Estado = "sin_tecnico";
+                        detalle.Error = $"No se encontró técnico para la torre {inc.Torre}.";
+                        result.SinTecnico++;
+                        result.Detalles.Add(detalle);
+                        continue;
+                    }
+
+                    detalle.Tecnico = t.Nombre;
+                    detalle.Telefono = t.Telefono;
+
+                    try
+                    {
+                        var smsMsg = $"Alerta Torre {inc.Torre}: {inc.Mensaje}";
+                        await _sms.EnviarSmsAsync(t.Telefono, smsMsg);
+                        detalle.Estado = "enviado";
+                        result.Enviados++;
+                    }
+                    catch (Exception ex)
+                    {
+                        detalle.Estado = "sms_error";
+                        detalle.Error = $"Fallo envío SMS: {ex.Message}";
+                        result.FallosSms++;
+                    }
+
+                    result.Detalles.Add(detalle);
                 }
+
+                return Ok(result);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error ejecutando Python local: {ex.Message}");
+                // Cualquier otro error no contemplado
+                result.ErroresGenerales.Add($"Error inesperado: {ex.Message}");
+                return StatusCode(500, result);
             }
-
-            return eventos;
         }
 
     }

@@ -3,8 +3,9 @@
     public class AppSettings
     {
         public string CsvPath { get; set; } = "";
-        public string PythonPath { get; set; } = "";
-        public string ScriptPath { get; set; } = "";
+        //public string PythonPath { get; set; } = "";
+        //public string ScriptPath { get; set; } = "";
+        public string ProviderMode { get; set; } = "auto";
         public SmsSettings Sms { get; set; } = new();
         public List<ServerConfig> Servers { get; set; } = new();
     }
@@ -14,6 +15,7 @@
         public string Endpoint { get; set; } = "";
         public string User { get; set; } = "";
         public string Pass { get; set; } = "";
+        public int TimeoutSeconds { get; set; } = 15;
     }
 
     public class ServerConfig
@@ -21,6 +23,8 @@
         public string Host { get; set; } = "";
         public string User { get; set; } = "";
         public string Password { get; set; } = "";
+        public string PythonPath { get; set; } = "";
+        public string ScriptPath { get; set; } = "";
     }
 
 }
